@@ -1,0 +1,111 @@
+name: Build Release AAB & APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Lengkapi Struktur Proyek Android
+        run: |
+          flutter create . --org com.gerri.kalkulatorgaji --project-name kalkulator_gaji_pro
+          flutter pub get
+
+      - name: Dekode Keystore & Konfigurasi Signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          cat <<EOF > android/key.properties
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=upload-keystore.jks
+          EOF
+
+      - name: Aktifkan Release Signing di Gradle
+        run: |
+          python3 -c '
+          import os
+          gradle_kts = "android/app/build.gradle.kts"
+          gradle_groovy = "android/app/build.gradle"
+          if os.path.exists(gradle_kts):
+              with open(gradle_kts, "r") as f: content = f.read()
+              signing_block = """
+          import java.util.Properties
+          import java.io.FileInputStream
+          val keystoreProperties = Properties()
+          val keystorePropertiesFile = rootProject.file("key.properties")
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+          }
+          """
+              content = signing_block + content
+              content = content.replace("signingConfig = signingConfigs.getByName(\"debug\")", """signingConfigs.create("release") {
+                  keyAlias = keystoreProperties.getProperty("keyAlias")
+                  keyPassword = keystoreProperties.getProperty("keyPassword")
+                  storeFile = file(keystoreProperties.getProperty("storeFile"))
+                  storePassword = keystoreProperties.getProperty("storePassword")
+              }
+              signingConfig = signingConfigs.getByName("release")""")
+              with open(gradle_kts, "w") as f: f.write(content)
+          elif os.path.exists(gradle_groovy):
+              with open(gradle_groovy, "r") as f: content = f.read()
+              signing_header = """
+          def keystoreProperties = new Properties()
+          def keystorePropertiesFile = rootProject.file("key.properties")
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+          }
+          """
+              content = signing_header + content
+              content = content.replace("signingConfig signingConfigs.debug", """signingConfigs {
+                  release {
+                      keyAlias keystoreProperties["keyAlias"]
+                      keyPassword keystoreProperties["keyPassword"]
+                      storeFile file(keystoreProperties["storeFile"])
+                      storePassword keystoreProperties["storePassword"]
+                  }
+              }
+              signingConfig signingConfigs.release""")
+              with open(gradle_groovy, "w") as f: content = f.write(content)
+          '
+
+      - name: Build Android App Bundle (.aab)
+        run: flutter build appbundle --release
+
+      - name: Build APK Rilis (.apk)
+        run: flutter build apk --release
+
+      - name: Upload File AAB (Untuk Play Store)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-aab
+          path: build/app/outputs/bundle/release/app-release.aab
+
+      - name: Upload File APK (Untuk Tes Instal di HP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
